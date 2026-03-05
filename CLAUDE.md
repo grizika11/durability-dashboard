@@ -83,8 +83,11 @@ const C = {
 - `uploaded_workouts` — coach-uploaded workout files
 - RLS policies applied — use service role for seeding, anon key for reads
 
-## Real Athlete Data (embedded in file)
-10 athletes with real Supabase data. Gabby Rizika has 265 assessments and is the primary test case. Do not modify the hardcoded athlete data arrays unless explicitly asked — they come from real Supabase queries.
+## Live Supabase Data
+Athletes and assessment data are now fetched live from Supabase on load. The `App` component fetches `user_profiles` and computes assessment counts/scores, then passes `athletes` as a prop to `AthleteList`. `AthleteDetail` lazy-loads assessment results and exercise reps when an athlete is selected. Hardcoded `FALLBACK_DB` at the top of the file is used as fallback when Supabase is unavailable.
+
+### .env requirement
+A `.env` file with `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` is required. See `.env.example`.
 
 ## Injuries (important for program logic)
 - 6/10 athletes have lower body injuries
@@ -94,6 +97,7 @@ const C = {
 
 ## State Architecture
 Key state in `App` (root):
+- `athletes` / `athletesLoading` — fetched from Supabase `user_profiles` on mount, passed to `AthleteList`
 - `savedWorkouts` / `setSavedWorkouts` — passed down to ProgramsTab → TeamsView + BuilderView + WorkoutLibraryView
 
 Key state in `TeamsView`:

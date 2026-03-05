@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from "recharts";
+import { supabase } from "./lib/supabase";
 
-// ─── REAL DATA (fetched via Supabase MCP 2026-03-05) ─────────────────────────
-const DB = {
+// ─── FALLBACK DATA (used when Supabase is unavailable) ───────────────────────
+const FALLBACK_DB = {
   athletes: [
     { id:"49ca8f8e-00dc-4582-a92e-58212121f777", first_name:"Gabby",     last_name:"Rizika",      assessmentCount:265, latestScore:0.62, firstScore:0.59, lastDate:"2026-03-05T02:44:10Z", history:[0.53,0.59,0.64,0.72,0.69,0.62] },
     { id:"0812572d-48a9-40c9-bff8-bd5afc289d7d", first_name:"Hannah",    last_name:"Steadman",    assessmentCount:11,  latestScore:0.72, firstScore:0.74, lastDate:"2026-03-04T16:38:20Z", history:[0.74,0.73,0.72,0.73,0.72] },
@@ -275,13 +276,14 @@ function AssessmentDetail({assessment,exercises,onBack}){
 }
 
 // ─── ASSESSMENTS TAB ─────────────────────────────────────────────────────────
-function AssessmentsTab({athlete}){
+function AssessmentsTab({athlete,assessments:propAssessments,exercises:propExercises}){
   const[selected,setSelected]=useState(null);
-  const assessments=DB.assessments[athlete.id]||[];
+  const assessments=propAssessments||FALLBACK_DB.assessments[athlete.id]||[];
+  const exercises=propExercises||FALLBACK_DB.exercises;
 
   if(selected){
     const detail=assessments.find(a=>a.id===selected);
-    return <AssessmentDetail assessment={detail} exercises={DB.exercises[selected]||[]} onBack={()=>setSelected(null)}/>;
+    return <AssessmentDetail assessment={detail} exercises={(exercises||{})[selected]||[]} onBack={()=>setSelected(null)}/>;
   }
 
   if(!assessments.length) return(
@@ -304,7 +306,7 @@ function AssessmentsTab({athlete}){
           const s=pct(a.durability_score),col=sc(s);
           const prev=assessments[i+1];
           const diff=prev?s-pct(prev.durability_score):null;
-          const hasEx=!!DB.exercises[a.id];
+          const hasEx=!!(exercises||{})[a.id];
           const regions=[["Shoulder",a.shoulder_score],["Hips",a.hips_score],["Core",a.core_score],["Lower Back",a.lower_back_score]].filter(([,v])=>v!=null&&parseFloat(v)>0);
           const lowest=[...regions].sort((a,b)=>parseFloat(a[1])-parseFloat(b[1]))[0];
           return(
@@ -355,8 +357,8 @@ function AssessmentsTab({athlete}){
 }
 
 // ─── OVERVIEW TAB ─────────────────────────────────────────────────────────────
-function OverviewTab({athlete}){
-  const assessments=DB.assessments[athlete.id]||[];
+function OverviewTab({athlete,assessments:propAssessments}){
+  const assessments=propAssessments||FALLBACK_DB.assessments[athlete.id]||[];
   if(!assessments.length) return <div style={{textAlign:"center",color:C.muted,padding:48,fontSize:14}}>No assessments yet.</div>;
   const latest=assessments[0];
   const s=pct(latest.durability_score);
@@ -425,7 +427,98 @@ function OverviewTab({athlete}){
 // ─── ATHLETE DETAIL ───────────────────────────────────────────────────────────
 function AthleteDetail({athlete,onBack}){
   const[tab,setTab]=useState("overview");
+  const[liveAssessments,setLiveAssessments]=useState(null);
+  const[liveExercises,setLiveExercises]=useState(null);
+  const[loadingAssessments,setLoadingAssessments]=useState(true);
   const st=ST[status(athlete.latestScore,athlete.firstScore)]||ST.stable;
+
+  useEffect(()=>{
+    if(!athlete?.id) return;
+    let cancelled=false;
+    (async()=>{
+      setLoadingAssessments(true);
+      try {
+        const {data:assessments}=await supabase
+          .from("assessments")
+          .select("id,created_at")
+          .eq("user_id",athlete.id)
+          .order("created_at",{ascending:false})
+          .limit(10);
+        if(cancelled||!assessments?.length){setLoadingAssessments(false);return;}
+
+        const {data:results}=await supabase
+          .from("assessment_results")
+          .select("assessment_id,body_region,score,super_metric,created_at")
+          .in("assessment_id",assessments.map(a=>a.id));
+
+        if(cancelled) return;
+
+        // Group results by assessment_id, build the same shape as FALLBACK_DB.assessments
+        const grouped=assessments.map(a=>{
+          const rows=(results||[]).filter(r=>r.assessment_id===a.id);
+          const regionMap={};
+          const smetMap={};
+          rows.forEach(r=>{
+            if(r.body_region) regionMap[r.body_region]=parseFloat(r.score);
+            if(r.super_metric) smetMap[r.super_metric]=parseFloat(r.score);
+          });
+          // Compute durability as avg of all region scores
+          const regionVals=Object.values(regionMap);
+          const durability=regionVals.length?regionVals.reduce((a,b)=>a+b,0)/regionVals.length:null;
+          return {
+            id:a.id,
+            created_at:a.created_at,
+            durability_score:durability,
+            shoulder_score:regionMap.shoulder??regionMap.shoulders??null,
+            hips_score:regionMap.hips??null,
+            knee_score:regionMap.knee??regionMap.knees??null,
+            ankle_score:regionMap.ankle??regionMap.ankles??null,
+            core_score:regionMap.core??null,
+            lower_back_score:regionMap.lower_back??null,
+            chest_score:regionMap.chest??null,
+            arms_score:regionMap.arms??null,
+            range_of_motion_score:smetMap.range_of_motion??smetMap.rom??null,
+            flexibility_score:smetMap.flexibility??null,
+            mobility_score:smetMap.mobility??null,
+            functional_strength_score:smetMap.functional_strength??null,
+          };
+        });
+
+        // Fetch exercise reps for assessments that have them
+        const {data:reps}=await supabase
+          .from("assessment_exercise_reps")
+          .select("assessment_id,exercise_name,rep_number,score,created_at")
+          .in("assessment_id",assessments.map(a=>a.id))
+          .order("exercise_name").order("rep_number");
+
+        if(cancelled) return;
+
+        // Group exercises by assessment_id
+        const exByAssessment={};
+        (reps||[]).forEach(r=>{
+          if(!exByAssessment[r.assessment_id]) exByAssessment[r.assessment_id]={};
+          if(!exByAssessment[r.assessment_id][r.exercise_name]) exByAssessment[r.assessment_id][r.exercise_name]=[];
+          exByAssessment[r.assessment_id][r.exercise_name].push(r.score);
+        });
+        const exerciseMap={};
+        Object.entries(exByAssessment).forEach(([aId,exObj])=>{
+          exerciseMap[aId]=Object.entries(exObj).map(([name,repScores])=>({
+            name,
+            reps:repScores,
+            nuances:[],
+            angles:[],
+          }));
+        });
+
+        setLiveAssessments(grouped);
+        setLiveExercises(exerciseMap);
+      } catch(e){
+        // Silently fall back to hardcoded data
+      }
+      setLoadingAssessments(false);
+    })();
+    return ()=>{cancelled=true;};
+  },[athlete?.id]);
   return(
     <div>
       <button onClick={onBack} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,color:C.sub,padding:"0 0 20px",fontWeight:500}}>
@@ -457,17 +550,21 @@ function AthleteDetail({athlete,onBack}){
           </button>
         ))}
       </div>
-      {tab==="overview"&&<OverviewTab athlete={athlete}/>}
-      {tab==="assessments"&&<AssessmentsTab athlete={athlete}/>}
-      {tab==="progress"&&<ProgressTab athlete={athlete}/>}
+      {loadingAssessments&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:120,color:C.muted,fontSize:13}}>Loading assessment data...</div>}
+      {!loadingAssessments&&tab==="overview"&&<OverviewTab athlete={athlete} assessments={liveAssessments}/>}
+      {!loadingAssessments&&tab==="assessments"&&<AssessmentsTab athlete={athlete} assessments={liveAssessments} exercises={liveExercises}/>}
+      {!loadingAssessments&&tab==="progress"&&<ProgressTab athlete={athlete}/>}
     </div>
   );
 }
 
 // ─── ATHLETE LIST ─────────────────────────────────────────────────────────────
-function AthleteList({onSelect}){
+function AthleteList({onSelect,athletes:propAthletes,loading}){
   const[search,setSearch]=useState("");
-  const athletes=DB.athletes.map(a=>({...a,lastSeen:dAgo(a.lastDate),status:status(a.latestScore,a.firstScore)}));
+  if(loading) return(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:300,color:C.muted,fontSize:14}}>Loading athletes...</div>
+  );
+  const athletes=(propAthletes||FALLBACK_DB.athletes).map(a=>({...a,lastSeen:dAgo(a.lastDate),status:status(a.latestScore,a.firstScore)}));
   const filtered=athletes.filter(a=>`${a.first_name} ${a.last_name}`.toLowerCase().includes(search.toLowerCase()));
   const withS=athletes.filter(a=>a.latestScore!=null);
   const teamAvg=withS.length?Math.round(avg(withS.map(a=>a.latestScore))*100):0;
@@ -2196,6 +2293,86 @@ export default function App() {
   const [nav, setNav] = useState("athletes");
   const [savedWorkouts, setSavedWorkouts] = useState([]);
   const contentRef = useRef(null);
+  const [athletes, setAthletes] = useState(null);
+  const [athletesLoading, setAthletesLoading] = useState(true);
+
+  useEffect(()=>{
+    (async()=>{
+      try {
+        const {data,error}=await supabase
+          .from("user_profiles")
+          .select("id,first_name,last_name,injuries")
+          .order("first_name");
+        if(error||!data){setAthletesLoading(false);return;}
+        // For each athlete, get their assessment count and latest score
+        const ids=data.map(p=>p.id);
+        const {data:assessments}=await supabase
+          .from("assessments")
+          .select("id,user_id,created_at")
+          .in("user_id",ids)
+          .order("created_at",{ascending:false});
+        // Get latest assessment results for scores
+        const latestAssessmentIds=[];
+        const countMap={};
+        const lastDateMap={};
+        const firstDateMap={};
+        (assessments||[]).forEach(a=>{
+          countMap[a.user_id]=(countMap[a.user_id]||0)+1;
+          if(!lastDateMap[a.user_id]) lastDateMap[a.user_id]=a.created_at;
+          firstDateMap[a.user_id]=a.created_at;
+          // Keep up to 10 latest per user for history
+        });
+        // Get unique latest assessment per user for score
+        const latestPerUser={};
+        (assessments||[]).forEach(a=>{
+          if(!latestPerUser[a.user_id]) latestPerUser[a.user_id]=[];
+          if(latestPerUser[a.user_id].length<10) latestPerUser[a.user_id].push(a.id);
+        });
+        const allLatestIds=Object.values(latestPerUser).flat();
+        let resultsMap={};
+        if(allLatestIds.length){
+          const {data:results}=await supabase
+            .from("assessment_results")
+            .select("assessment_id,body_region,score")
+            .in("assessment_id",allLatestIds);
+          // Group scores by assessment_id → compute durability per assessment
+          const durByAssessment={};
+          (results||[]).forEach(r=>{
+            if(!durByAssessment[r.assessment_id]) durByAssessment[r.assessment_id]=[];
+            if(r.body_region) durByAssessment[r.assessment_id].push(parseFloat(r.score));
+          });
+          // For each user, compute history from their assessments (newest first in latestPerUser)
+          data.forEach(p=>{
+            const aIds=latestPerUser[p.id]||[];
+            const history=aIds.map(aId=>{
+              const scores=durByAssessment[aId]||[];
+              return scores.length?scores.reduce((a,b)=>a+b,0)/scores.length:null;
+            }).filter(v=>v!=null);
+            resultsMap[p.id]=history;
+          });
+        }
+        const transformed=data.map(p=>{
+          const history=resultsMap[p.id]||[];
+          const latestScore=history.length?history[0]:null;
+          const firstScore=history.length?history[history.length-1]:null;
+          return {
+            id:p.id,
+            first_name:p.first_name,
+            last_name:p.last_name,
+            injuries:p.injuries||[],
+            assessmentCount:countMap[p.id]||0,
+            latestScore,firstScore,
+            lastDate:lastDateMap[p.id]||null,
+            history:history.slice().reverse(),
+          };
+        });
+        setAthletes(transformed);
+      } catch(e){
+        // Fall back to hardcoded data
+      }
+      setAthletesLoading(false);
+    })();
+  },[]);
 
   const navItems = [
     {id:"athletes",label:"Athletes",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>},
@@ -2243,7 +2420,7 @@ export default function App() {
         {nav === "sessions"  && <SessionsTab />}
         {nav === "athletes"  && (
           view === "list"
-            ? <AthleteList onSelect={a => { setSelected(a); setView("detail"); if (contentRef.current) contentRef.current.scrollTop = 0; }} />
+            ? <AthleteList athletes={athletes} loading={athletesLoading} onSelect={a => { setSelected(a); setView("detail"); if (contentRef.current) contentRef.current.scrollTop = 0; }} />
             : <AthleteDetail athlete={selected} onBack={() => { setSelected(null); setView("list"); }} />
         )}
       </main>
