@@ -159,8 +159,11 @@ function useAthletes(){
       });
       const teamNameById={};
       (teamsData||[]).forEach(t=>{teamNameById[t.id]=t.name;});
-      const teamByProfile={};
-      (teamMembers||[]).forEach(m=>{teamByProfile[m.profile_id]={id:m.team_id,name:teamNameById[m.team_id]||"Unknown"};});
+      const teamsByProfile={};
+      (teamMembers||[]).forEach(m=>{
+        if(!teamsByProfile[m.profile_id]) teamsByProfile[m.profile_id]=[];
+        teamsByProfile[m.profile_id].push({id:m.team_id,name:teamNameById[m.team_id]||"Unknown"});
+      });
 
       const {data:assessments,error:aErr}=await supabase
         .from("assessments")
@@ -198,8 +201,9 @@ function useAthletes(){
         return {
           id:p.id,first_name:p.first_name,last_name:p.last_name,
           injuries:injuriesByProfile[p.id]||[],
-          teamId:teamByProfile[p.id]?.id||null,
-          teamName:teamByProfile[p.id]?.name||null,
+          teams:teamsByProfile[p.id]||[],
+          teamId:teamsByProfile[p.id]?.[0]?.id||null,
+          teamName:teamsByProfile[p.id]?.[0]?.name||null,
           assessmentCount:countMap[p.id]||0,
           latestScore,firstScore,
           lastDate:lastDateMap[p.id]||null,
@@ -310,6 +314,15 @@ function useAthleteAssessments(athleteId){
   useEffect(()=>{load();},[athleteId]);
 
   return {assessments,exercises,loading,reload:load};
+}
+
+function useTeams(){
+  const[teams,setTeams]=useState([]);
+  useEffect(()=>{
+    supabase.from("teams").select("id,name,color").order("name")
+      .then(({data})=>setTeams(data||[]));
+  },[]);
+  return {teams,setTeams};
 }
 
 function useMovements(){
@@ -698,8 +711,8 @@ function AthleteList({onSelect,athletes:propAthletes,loading}){
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:300,color:C.muted,fontSize:14}}>Loading athletes...</div>
   );
   const athletes=(propAthletes||FALLBACK_DB.athletes).map(a=>({...a,lastSeen:dAgo(a.lastDate),status:status(a.latestScore,a.firstScore)}));
-  const teamNames=[...new Set(athletes.map(a=>a.teamName).filter(Boolean))].sort();
-  const afterTeam=teamFilter==="all"?athletes:teamFilter==="none"?athletes.filter(a=>!a.teamName):athletes.filter(a=>a.teamName===teamFilter);
+  const teamNames=[...new Set(athletes.flatMap(a=>(a.teams||[]).map(t=>t.name)))].sort();
+  const afterTeam=teamFilter==="all"?athletes:teamFilter==="none"?athletes.filter(a=>!a.teams?.length):athletes.filter(a=>(a.teams||[]).some(t=>t.name===teamFilter));
   const searched=afterTeam.filter(a=>`${a.first_name} ${a.last_name}`.toLowerCase().includes(search.toLowerCase()));
   const filtered=[...searched].sort((a,b)=>{
     if(sort==="name-az") return `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`);
@@ -770,7 +783,7 @@ function AthleteList({onSelect,athletes:propAthletes,loading}){
                 <div style={{fontSize:14,fontWeight:700,color:C.ink}}>{a.first_name} {a.last_name}</div>
                 <div style={{display:"flex",gap:6,alignItems:"center"}}>
                   <span style={{fontSize:12,color:C.muted}}>{a.assessmentCount} assessments</span>
-                  {a.teamName&&<span style={{fontSize:9,background:C.limeXl,color:"#365314",borderRadius:4,padding:"1px 6px",fontWeight:700}}>{a.teamName}</span>}
+                  {(a.teams||[]).map(t=><span key={t.id} style={{fontSize:9,background:C.limeXl,color:"#365314",borderRadius:4,padding:"1px 6px",fontWeight:700}}>{t.name}</span>)}
                 </div>
               </div>
               <span style={{background:st.bg,color:st.color,borderRadius:999,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{st.label}</span>
@@ -2429,99 +2442,269 @@ function TVDisplay({ session, onClose }) {
 }
 
 // ─── TEAMS PAGE ──────────────────────────────────────────────────────────────
-function TeamsPage({athletes}){
-  const[expanded,setExpanded]=useState(null);
-  const allAthletes=athletes||FALLBACK_DB.athletes;
-  const teamMap={};
-  allAthletes.forEach(a=>{
-    const key=a.teamId||"__none";
-    if(!teamMap[key]) teamMap[key]={id:a.teamId,name:a.teamName||"Unassigned",members:[]};
-    teamMap[key].members.push(a);
-  });
-  const teams=Object.values(teamMap).sort((a,b)=>a.name==="Unassigned"?1:b.name==="Unassigned"?-1:a.name.localeCompare(b.name));
-  const TEAM_COLORS={"Performance Group":"#c8e64e","Rehab Track":"#fb923c","Foundations":"#818cf8","Unassigned":"#a1a1aa"};
-
+function TeamRoster({team,athletes,onRemove,onAdd,onDeleteTeam,onDragStart}){
+  const[adding,setAdding]=useState(false);
+  const members=athletes.filter(a=>(a.teams||[]).some(t=>t.id===team.id));
+  const nonMembers=athletes.filter(a=>!(a.teams||[]).some(t=>t.id===team.id));
+  const scored=members.filter(m=>m.latestScore!=null);
+  const avgScore=scored.length?Math.round(avg(scored.map(m=>m.latestScore))*100):null;
   return(
     <div>
-      <div style={{marginBottom:26}}>
-        <h1 style={{fontSize:28,fontWeight:800,color:C.ink,margin:"0 0 4px"}}>Teams</h1>
-        <p style={{margin:0,fontSize:14,color:C.sub}}>Overview of team composition, scores, and injury status</p>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:800,color:C.ink}}>{team.name}</div>
+          <div style={{fontSize:13,color:C.muted}}>
+            {members.length} athlete{members.length!==1?"s":""}
+            {avgScore!=null&&<span style={{marginLeft:12,color:sc(avgScore),fontWeight:700}}>Avg {avgScore}</span>}
+          </div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button onClick={()=>setAdding(!adding)} style={{display:"flex",alignItems:"center",gap:5,background:C.lime,color:C.ink,border:"none",borderRadius:8,padding:"7px 12px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:12}}>
+            <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add Athlete
+          </button>
+          <button onClick={()=>onDeleteTeam(team.id)} style={{background:"none",border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 10px",cursor:"pointer",color:C.muted,fontSize:12,fontFamily:"inherit"}}>Delete Team</button>
+        </div>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14,marginBottom:24}}>
-        {teams.map(team=>{
-          const col=TEAM_COLORS[team.name]||"#a1a1aa";
-          const scored=team.members.filter(m=>m.latestScore!=null);
-          const avgScore=scored.length?Math.round(avg(scored.map(m=>m.latestScore))*100):null;
-          const atRisk=team.members.filter(m=>m.latestScore&&m.latestScore<0.55).length;
-          const injured=team.members.filter(m=>m.injuries?.length>0).length;
-          return(
-            <div key={team.id||"none"} onClick={()=>setExpanded(expanded===team.id?null:team.id)} style={{background:C.surface,borderRadius:C.radius,border:`1px solid ${expanded===team.id?col:C.border}`,overflow:"hidden",cursor:"pointer",transition:"border-color .15s"}}
-              onMouseEnter={e=>{if(expanded!==team.id)e.currentTarget.style.borderColor=col+"80";}}
-              onMouseLeave={e=>{if(expanded!==team.id)e.currentTarget.style.borderColor=C.border;}}>
-              <div style={{padding:"20px 22px"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-                  <div style={{width:12,height:12,borderRadius:"50%",background:col,flexShrink:0,boxShadow:`0 0 0 3px ${col}40`}}/>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:16,fontWeight:800,color:C.ink}}>{team.name}</div>
-                    <div style={{fontSize:12,color:C.muted}}>{team.members.length} athlete{team.members.length!==1?"s":""}</div>
-                  </div>
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth={2.5} style={{transform:expanded===team.id?"rotate(180deg)":"none",transition:"transform .2s"}}><polyline points="6 9 12 15 18 9"/></svg>
-                </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-                  <div style={{background:C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
-                    <div style={{fontSize:22,fontWeight:800,color:avgScore?sc(avgScore):C.muted,lineHeight:1}}>{avgScore??"-"}</div>
-                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>Avg Score</div>
-                  </div>
-                  <div style={{background:atRisk>0?"#fff7ed":C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
-                    <div style={{fontSize:22,fontWeight:800,color:atRisk>0?"#ea580c":C.muted,lineHeight:1}}>{atRisk}</div>
-                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>At Risk</div>
-                  </div>
-                  <div style={{background:injured>0?"#fef2f2":C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
-                    <div style={{fontSize:22,fontWeight:800,color:injured>0?"#dc2626":C.muted,lineHeight:1}}>{injured}</div>
-                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>Injured</div>
-                  </div>
-                </div>
-                <div style={{display:"flex",gap:-4,marginTop:12}}>
-                  {team.members.slice(0,6).map((m,i)=>(
-                    <div key={m.id} style={{width:30,height:30,borderRadius:"50%",background:C.limeXl,border:`2px solid ${C.surface}`,display:"grid",placeItems:"center",fontWeight:800,fontSize:9,color:C.ink,marginLeft:i>0?-6:0,zIndex:6-i}}>
-                      {(m.first_name?.[0]||"")+(m.last_name?.[0]||"")}
-                    </div>
-                  ))}
-                  {team.members.length>6&&<div style={{width:30,height:30,borderRadius:"50%",background:C.bg,border:`2px solid ${C.surface}`,display:"grid",placeItems:"center",fontSize:9,fontWeight:700,color:C.muted,marginLeft:-6}}>+{team.members.length-6}</div>}
-                </div>
+      {adding&&(
+        <div style={{background:C.limeXl,border:`1px solid ${C.lime}`,borderRadius:C.radiusSm,padding:"12px 14px",marginBottom:16}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.ink,marginBottom:8}}>Add athlete to {team.name}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6,maxHeight:200,overflowY:"auto"}}>
+            {nonMembers.length===0&&<div style={{fontSize:13,color:C.muted}}>All athletes are already in this team.</div>}
+            {nonMembers.map(a=>(
+              <div key={a.id} onClick={()=>{onAdd(a.id,team.id);setAdding(false);}}
+                style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:7,background:C.surface,cursor:"pointer",border:`1px solid ${C.border}`,transition:"border-color .1s"}}
+                onMouseEnter={e=>e.currentTarget.style.borderColor=C.lime}
+                onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                <div style={{width:28,height:28,borderRadius:"50%",background:C.limeXl,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:C.ink}}>{(a.first_name?.[0]||"")+(a.last_name?.[0]||"")}</div>
+                <span style={{fontSize:13,fontWeight:600,color:C.ink}}>{a.first_name} {a.last_name}</span>
+                {a.teams?.length>0&&<span style={{fontSize:11,color:C.muted,marginLeft:"auto"}}>In: {a.teams.map(t=>t.name).join(", ")}</span>}
               </div>
-              {expanded===team.id&&(
-                <div style={{borderTop:`1px solid ${C.border}`}}>
-                  {team.members.map((m,i)=>{
-                    const s=m.latestScore?Math.round(m.latestScore*100):null;
-                    const mCol=s?sc(s):C.muted;
-                    const st=ST[status(m.latestScore,m.firstScore)]||ST.stable;
-                    return(
-                      <div key={m.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 22px",borderBottom:i<team.members.length-1?`1px solid ${C.border}`:"none"}}>
-                        <div style={{width:34,height:34,borderRadius:"50%",background:C.limeXl,display:"grid",placeItems:"center",fontWeight:800,fontSize:11,color:C.ink,flexShrink:0}}>
-                          {(m.first_name?.[0]||"")+(m.last_name?.[0]||"")}
-                        </div>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:13,fontWeight:700,color:C.ink}}>{m.first_name} {m.last_name}</div>
-                          <div style={{fontSize:11,color:C.muted}}>{m.assessmentCount} assessments</div>
-                        </div>
-                        <span style={{background:st.bg,color:st.color,borderRadius:999,padding:"2px 8px",fontSize:10,fontWeight:700}}>{st.label}</span>
-                        <span style={{fontSize:20,fontWeight:800,color:mCol,minWidth:36,textAlign:"right"}}>{s??"--"}</span>
-                        {m.injuries?.length>0&&(
-                          <div style={{display:"flex",gap:3,flexWrap:"wrap",maxWidth:140}}>
-                            {m.injuries.slice(0,2).map((inj,j)=><span key={j} style={{fontSize:9,background:"#fef2f2",color:"#dc2626",borderRadius:4,padding:"1px 5px",fontWeight:600}}>{inj.length>16?inj.slice(0,16)+"...":inj}</span>)}
-                            {m.injuries.length>2&&<span style={{fontSize:9,color:C.muted}}>+{m.injuries.length-2}</span>}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:C.radius,overflow:"hidden"}}>
+        {members.length===0?(
+          <div style={{padding:32,textAlign:"center",color:C.muted,fontSize:14}}>No athletes yet. Add athletes above or drag them from the left panel.</div>
+        ):members.sort((a,b)=>(b.latestScore||0)-(a.latestScore||0)).map((a,i)=>{
+          const s=a.latestScore?Math.round(a.latestScore*100):null;
+          const col=s?sc(s):C.muted;
+          const st=ST[status(a.latestScore,a.firstScore)]||ST.stable;
+          return(
+            <div key={a.id} draggable onDragStart={()=>onDragStart(a)}
+              style={{display:"flex",alignItems:"center",gap:14,padding:"13px 18px",borderBottom:i<members.length-1?`1px solid ${C.border}`:"none",cursor:"grab",transition:"background .1s"}}
+              onMouseEnter={e=>e.currentTarget.style.background=C.bg}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              <svg width={14} height={14} viewBox="0 0 24 24" fill={C.muted} stroke="none">
+                <circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/>
+                <circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>
+                <circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>
+              </svg>
+              <div style={{width:34,height:34,borderRadius:"50%",background:C.limeXl,display:"grid",placeItems:"center",fontWeight:800,fontSize:11,color:C.ink,flexShrink:0}}>
+                {(a.first_name?.[0]||"")+(a.last_name?.[0]||"")}
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:600,fontSize:14,color:C.ink}}>{a.first_name} {a.last_name}</div>
+                {a.teams?.length>1&&<div style={{fontSize:11,color:C.muted}}>Also in: {a.teams.filter(t=>t.id!==team.id).map(t=>t.name).join(", ")}</div>}
+              </div>
+              <span style={{background:st.bg,color:st.color,borderRadius:999,padding:"2px 8px",fontSize:10,fontWeight:700}}>{st.label}</span>
+              {s!=null&&<span style={{fontSize:18,fontWeight:800,color:col}}>{s}</span>}
+              <button onClick={e=>{e.stopPropagation();onRemove(a.id,team.id);}}
+                style={{background:"none",border:"none",cursor:"pointer",color:C.muted,padding:4,borderRadius:4,lineHeight:0}}
+                title="Remove from team"
+                onMouseEnter={e=>e.currentTarget.style.color="#ef4444"}
+                onMouseLeave={e=>e.currentTarget.style.color=C.muted}>
+                <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function AllAthletesPanel({athletes,onDragStart}){
+  const[search,setSearch]=useState("");
+  const filtered=athletes.filter(a=>`${a.first_name} ${a.last_name}`.toLowerCase().includes(search.toLowerCase()));
+  return(
+    <div>
+      <div style={{fontSize:18,fontWeight:800,color:C.ink,marginBottom:4}}>All Athletes</div>
+      <div style={{fontSize:13,color:C.muted,marginBottom:14}}>Drag athletes to a team on the left, or select a team to manage its roster</div>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes..."
+        style={{width:"100%",padding:"9px 14px",border:`1px solid ${C.border}`,borderRadius:C.radiusSm,fontSize:13,fontFamily:"inherit",background:C.surface,outline:"none",color:C.ink,marginBottom:14,boxSizing:"border-box"}}/>
+      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:C.radius,overflow:"hidden"}}>
+        {filtered.map((a,i)=>{
+          const s=a.latestScore?Math.round(a.latestScore*100):null;
+          const col=s?sc(s):C.muted;
+          return(
+            <div key={a.id} draggable onDragStart={()=>onDragStart(a)}
+              style={{display:"flex",alignItems:"center",gap:12,padding:"11px 18px",borderBottom:i<filtered.length-1?`1px solid ${C.border}`:"none",cursor:"grab",transition:"background .1s"}}
+              onMouseEnter={e=>e.currentTarget.style.background=C.bg}
+              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+              <svg width={14} height={14} viewBox="0 0 24 24" fill={C.muted} stroke="none">
+                <circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/>
+                <circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/>
+                <circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/>
+              </svg>
+              <div style={{width:30,height:30,borderRadius:"50%",background:C.limeXl,display:"grid",placeItems:"center",fontWeight:800,fontSize:10,color:C.ink,flexShrink:0}}>
+                {(a.first_name?.[0]||"")+(a.last_name?.[0]||"")}
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,fontWeight:700,color:C.ink}}>{a.first_name} {a.last_name}</div>
+                <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:2}}>
+                  {(a.teams||[]).map(t=><span key={t.id} style={{fontSize:9,background:C.limeXl,color:"#365314",borderRadius:4,padding:"1px 5px",fontWeight:700}}>{t.name}</span>)}
+                  {(!a.teams||a.teams.length===0)&&<span style={{fontSize:9,color:C.muted}}>No team</span>}
+                </div>
+              </div>
+              {s!=null&&<span style={{fontSize:16,fontWeight:800,color:col}}>{s}</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TeamsPage({teams,setTeams,athletes,reload}){
+  const[selectedTeam,setSelectedTeam]=useState(null);
+  const[draggingAthlete,setDraggingAthlete]=useState(null);
+  const[dragOverTeam,setDragOverTeam]=useState(null);
+  const[creating,setCreating]=useState(false);
+  const[newTeamName,setNewTeamName]=useState("");
+  const[saving,setSaving]=useState(false);
+  const[toast,setToast]=useState(null);
+  const allAthletes=athletes||[];
+
+  const showToast=msg=>{setToast(msg);setTimeout(()=>setToast(null),3000);};
+
+  async function handleCreateTeam(){
+    if(!newTeamName.trim())return;
+    setSaving(true);
+    const{data,error}=await supabase.from("teams").insert({name:newTeamName.trim()}).select().single();
+    if(!error&&data){setTeams(prev=>[...prev,data]);setSelectedTeam(data);}
+    setNewTeamName("");setCreating(false);setSaving(false);
+    if(!error) showToast(`Team "${data.name}" created`);
+  }
+
+  async function handleDeleteTeam(teamId){
+    await supabase.from("team_members").delete().eq("team_id",teamId);
+    await supabase.from("teams").delete().eq("id",teamId);
+    setTeams(prev=>prev.filter(t=>t.id!==teamId));
+    setSelectedTeam(null);
+    reload();
+    showToast("Team deleted");
+  }
+
+  async function handleDropOnTeam(teamId){
+    if(!draggingAthlete)return;
+    if(teamId===null){
+      await supabase.from("team_members").delete().eq("profile_id",draggingAthlete.id);
+    } else {
+      const alreadyMember=(draggingAthlete.teams||[]).some(t=>t.id===teamId);
+      if(!alreadyMember){
+        await supabase.from("team_members").insert({profile_id:draggingAthlete.id,team_id:teamId});
+      }
+    }
+    setDraggingAthlete(null);
+    reload();
+    showToast(teamId===null?"Removed from all teams":"Added to team");
+  }
+
+  async function handleRemoveFromTeam(athleteId,teamId){
+    await supabase.from("team_members").delete().eq("profile_id",athleteId).eq("team_id",teamId);
+    reload();
+    showToast("Removed from team");
+  }
+
+  async function handleAddToTeam(athleteId,teamId){
+    await supabase.from("team_members").insert({profile_id:athleteId,team_id:teamId});
+    reload();
+    showToast("Added to team");
+  }
+
+  return(
+    <div>
+      <div style={{marginBottom:22}}>
+        <h1 style={{fontSize:28,fontWeight:800,color:C.ink,margin:"0 0 4px"}}>Teams</h1>
+        <p style={{margin:0,fontSize:14,color:C.sub}}>Manage team rosters. Drag athletes between teams.</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"280px 1fr",gap:20,alignItems:"start"}}>
+        {/* LEFT: Team list */}
+        <div>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+            <div style={{fontSize:14,fontWeight:800,color:C.ink}}>Teams</div>
+            <button onClick={()=>setCreating(true)} style={{display:"flex",alignItems:"center",gap:5,background:C.lime,color:C.ink,border:"none",borderRadius:8,padding:"6px 11px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:11}}>
+              <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={3}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              New Team
+            </button>
+          </div>
+          {creating&&(
+            <div style={{background:C.limeXl,border:`1px solid ${C.lime}`,borderRadius:C.radiusSm,padding:"12px 14px",marginBottom:12}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.ink,marginBottom:8}}>Team name</div>
+              <input autoFocus value={newTeamName} onChange={e=>setNewTeamName(e.target.value)}
+                onKeyDown={e=>{if(e.key==="Enter")handleCreateTeam();}}
+                placeholder="e.g. Recovery Group"
+                style={{width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.lime}`,fontSize:13,fontFamily:"inherit",background:C.surface,color:C.ink,marginBottom:10,boxSizing:"border-box"}}/>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={handleCreateTeam} disabled={!newTeamName.trim()||saving}
+                  style={{flex:1,background:C.ink,color:"#fff",border:"none",borderRadius:7,padding:"8px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:12,opacity:!newTeamName.trim()?0.4:1}}>
+                  {saving?"Creating...":"Create"}
+                </button>
+                <button onClick={()=>{setCreating(false);setNewTeamName("");}}
+                  style={{flex:1,background:C.bg,color:C.ink,border:`1px solid ${C.border}`,borderRadius:7,padding:"8px",cursor:"pointer",fontFamily:"inherit",fontWeight:700,fontSize:12}}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {teams.map(team=>{
+              const memberCount=allAthletes.filter(a=>(a.teams||[]).some(t=>t.id===team.id)).length;
+              const isSelected=selectedTeam?.id===team.id;
+              const isDragOver=dragOverTeam===team.id;
+              const scored=allAthletes.filter(a=>(a.teams||[]).some(t=>t.id===team.id)&&a.latestScore!=null);
+              const avgS=scored.length?Math.round(avg(scored.map(a=>a.latestScore))*100):null;
+              return(
+                <div key={team.id} onClick={()=>setSelectedTeam(team)}
+                  onDragOver={e=>{e.preventDefault();setDragOverTeam(team.id);}}
+                  onDragLeave={()=>setDragOverTeam(null)}
+                  onDrop={e=>{e.preventDefault();handleDropOnTeam(team.id);setDragOverTeam(null);}}
+                  style={{background:isSelected?C.limeXl:isDragOver?C.limeXl:C.surface,border:`2px solid ${isSelected?C.lime:isDragOver?C.lime:C.border}`,borderRadius:C.radiusSm,padding:"12px 14px",cursor:"pointer",transition:"all .15s",transform:isDragOver?"scale(1.02)":"none"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:14,color:C.ink}}>{team.name}</div>
+                      <div style={{fontSize:12,color:C.muted,marginTop:2}}>{memberCount} athlete{memberCount!==1?"s":""}{avgS!=null&&<span style={{marginLeft:8,color:sc(avgS),fontWeight:700}}>Avg {avgS}</span>}</div>
+                    </div>
+                    {isSelected&&<svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={C.ink} strokeWidth={2.5}><polyline points="20 6 9 17 4 12"/></svg>}
+                  </div>
+                </div>
+              );
+            })}
+            {/* Unassigned drop zone */}
+            <div onDragOver={e=>{e.preventDefault();setDragOverTeam("none");}}
+              onDragLeave={()=>setDragOverTeam(null)}
+              onDrop={e=>{e.preventDefault();handleDropOnTeam(null);setDragOverTeam(null);}}
+              style={{border:`2px dashed ${dragOverTeam==="none"?C.lime:C.border}`,borderRadius:C.radiusSm,padding:"12px 14px",background:dragOverTeam==="none"?C.limeXl:"transparent",transition:"all .15s",marginTop:4}}>
+              <div style={{fontSize:12,fontWeight:600,color:C.muted}}>Drop here to remove from team</div>
+            </div>
+          </div>
+        </div>
+        {/* RIGHT: Selected team roster OR all athletes */}
+        <div>
+          {selectedTeam
+            ?<TeamRoster team={selectedTeam} athletes={allAthletes} onRemove={handleRemoveFromTeam} onAdd={handleAddToTeam} onDeleteTeam={handleDeleteTeam} onDragStart={setDraggingAthlete}/>
+            :<AllAthletesPanel athletes={allAthletes} onDragStart={setDraggingAthlete}/>
+          }
+        </div>
+      </div>
+      {toast&&(
+        <div style={{position:"fixed",bottom:24,right:24,background:C.ink,color:"#fff",borderRadius:C.radiusSm,padding:"12px 18px",fontSize:13,fontWeight:600,boxShadow:"0 4px 24px rgba(0,0,0,.18)",zIndex:999,animation:"fadeIn .2s ease",maxWidth:320}}>
+          {toast}
+          <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}`}</style>
+        </div>
+      )}
     </div>
   );
 }
@@ -2534,6 +2717,7 @@ export default function App() {
   const [savedWorkouts, setSavedWorkouts] = useState([]);
   const contentRef = useRef(null);
   const {athletes,loading:athletesLoading,reload:reloadAthletes}=useAthletes();
+  const {teams,setTeams}=useTeams();
 
   // Auto-refresh athlete list every 60 seconds
   useEffect(()=>{
@@ -2583,7 +2767,7 @@ export default function App() {
         </div>
       </aside>
       <main ref={contentRef} style={{ flex: 1, overflow: "auto", padding: 30 }}>
-        {nav === "teams"     && <TeamsPage athletes={athletes} />}
+        {nav === "teams"     && <TeamsPage teams={teams} setTeams={setTeams} athletes={athletes} reload={reloadAthletes} />}
         {nav === "programs"  && <ProgramsTab savedWorkouts={savedWorkouts} setSavedWorkouts={setSavedWorkouts} />}
         {nav === "analytics" && <AnalyticsTab />}
         {nav === "sessions"  && <SessionsTab />}
