@@ -218,7 +218,7 @@ function useAthleteAssessments(athleteId){
   const[loading,setLoading]=useState(false);
 
   async function load(){
-    if(!supabase||!athleteId){return;}
+    if(!athleteId){return;}
     setLoading(true);
     try {
       const {data:aRows,error}=await supabase
