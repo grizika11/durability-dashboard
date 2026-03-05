@@ -433,7 +433,7 @@ function AthleteDetail({athlete,onBack}){
   const st=ST[status(athlete.latestScore,athlete.firstScore)]||ST.stable;
 
   useEffect(()=>{
-    if(!athlete?.id) return;
+    if(!athlete?.id||!supabase){setLoadingAssessments(false);return;}
     let cancelled=false;
     (async()=>{
       setLoadingAssessments(true);
@@ -530,7 +530,8 @@ function AthleteDetail({athlete,onBack}){
         setLiveAssessments(grouped);
         setLiveExercises(exerciseMap);
       } catch(e){
-        // Silently fall back to hardcoded data
+        console.error("fetchAssessments failed:",e);
+        // Fall back to hardcoded data
       }
       setLoadingAssessments(false);
     })();
@@ -2315,6 +2316,7 @@ export default function App() {
 
   useEffect(()=>{
     (async()=>{
+      if(!supabase){setAthletesLoading(false);return;}
       try {
         // Fetch profiles
         const {data:profiles,error}=await supabase
@@ -2382,7 +2384,8 @@ export default function App() {
         });
         setAthletes(transformed);
       } catch(e){
-        // Fall back to hardcoded data
+        console.error("fetchAthletes failed:",e);
+        // athletes stays null → fallback used in AthleteList
       }
       setAthletesLoading(false);
     })();
