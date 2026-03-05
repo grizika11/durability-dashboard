@@ -138,11 +138,6 @@ function useAthletes(){
   const[loading,setLoading]=useState(true);
 
   async function load(){
-    if(!supabase){
-      console.warn("No Supabase client — using fallback data");
-      setLoading(false);
-      return;
-    }
     try {
       setLoading(true);
       const {data:profiles,error}=await supabase
