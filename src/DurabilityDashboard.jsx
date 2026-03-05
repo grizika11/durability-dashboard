@@ -147,15 +147,20 @@ function useAthletes(){
       if(error) throw error;
       if(!profiles){setLoading(false);return;}
 
-      const {data:injRows}=await supabase
-        .from("profile_injuries")
-        .select("profile_id,injuries(name)")
-        .in("profile_id",profiles.map(p=>p.id));
+      const [{data:injRows},{data:teamsData},{data:teamMembers}]=await Promise.all([
+        supabase.from("profile_injuries").select("profile_id,injuries(name)").in("profile_id",profiles.map(p=>p.id)),
+        supabase.from("teams").select("id,name"),
+        supabase.from("team_members").select("team_id,profile_id"),
+      ]);
       const injuriesByProfile={};
       (injRows||[]).forEach(r=>{
         if(!injuriesByProfile[r.profile_id]) injuriesByProfile[r.profile_id]=[];
         if(r.injuries?.name) injuriesByProfile[r.profile_id].push(r.injuries.name);
       });
+      const teamNameById={};
+      (teamsData||[]).forEach(t=>{teamNameById[t.id]=t.name;});
+      const teamByProfile={};
+      (teamMembers||[]).forEach(m=>{teamByProfile[m.profile_id]={id:m.team_id,name:teamNameById[m.team_id]||"Unknown"};});
 
       const {data:assessments,error:aErr}=await supabase
         .from("assessments")
@@ -193,6 +198,8 @@ function useAthletes(){
         return {
           id:p.id,first_name:p.first_name,last_name:p.last_name,
           injuries:injuriesByProfile[p.id]||[],
+          teamId:teamByProfile[p.id]?.id||null,
+          teamName:teamByProfile[p.id]?.name||null,
           assessmentCount:countMap[p.id]||0,
           latestScore,firstScore,
           lastDate:lastDateMap[p.id]||null,
@@ -303,6 +310,42 @@ function useAthleteAssessments(athleteId){
   useEffect(()=>{load();},[athleteId]);
 
   return {assessments,exercises,loading,reload:load};
+}
+
+function useMovements(){
+  const[movements,setMovements]=useState(null);
+  const[loading,setLoading]=useState(true);
+  async function load(){
+    try{
+      setLoading(true);
+      const[{data:movs},{data:content}]=await Promise.all([
+        supabase.from("movements").select("id,name,default_body_part_impact_vector,required_equipment,is_assessment").order("name"),
+        supabase.from("movement_content").select("movement_id,video_url,short_description,long_description"),
+      ]);
+      const contentByMov={};
+      (content||[]).forEach(c=>{contentByMov[c.movement_id]=c;});
+      const result=(movs||[]).map(m=>{
+        const mc=contentByMov[m.id]||{};
+        const bodyVec=m.default_body_part_impact_vector||{};
+        const body=Object.entries(bodyVec).filter(([,v])=>v>0).sort((a,b)=>b[1]-a[1]).map(([k])=>k);
+        return {
+          id:m.id,name:m.name,
+          body:body.length?body:["general"],
+          equipment:(m.required_equipment&&m.required_equipment.length>0)?"equipment":"none",
+          is_assessment:m.is_assessment,
+          video_url:mc.video_url||null,
+          desc:mc.short_description||mc.long_description||"",
+        };
+      });
+      setMovements(result);
+    }catch(e){
+      console.error("Failed to load movements:",e.message||e);
+    }finally{
+      setLoading(false);
+    }
+  }
+  useEffect(()=>{load();},[]);
+  return {movements,loading,reload:load};
 }
 
 // ─── PRIMITIVES ───────────────────────────────────────────────────────────────
@@ -649,15 +692,28 @@ function AthleteDetail({athlete,onBack}){
 // ─── ATHLETE LIST ─────────────────────────────────────────────────────────────
 function AthleteList({onSelect,athletes:propAthletes,loading}){
   const[search,setSearch]=useState("");
+  const[sort,setSort]=useState("name-az");
+  const[teamFilter,setTeamFilter]=useState("all");
   if(loading) return(
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:300,color:C.muted,fontSize:14}}>Loading athletes...</div>
   );
   const athletes=(propAthletes||FALLBACK_DB.athletes).map(a=>({...a,lastSeen:dAgo(a.lastDate),status:status(a.latestScore,a.firstScore)}));
-  const filtered=athletes.filter(a=>`${a.first_name} ${a.last_name}`.toLowerCase().includes(search.toLowerCase()));
+  const teamNames=[...new Set(athletes.map(a=>a.teamName).filter(Boolean))].sort();
+  const afterTeam=teamFilter==="all"?athletes:teamFilter==="none"?athletes.filter(a=>!a.teamName):athletes.filter(a=>a.teamName===teamFilter);
+  const searched=afterTeam.filter(a=>`${a.first_name} ${a.last_name}`.toLowerCase().includes(search.toLowerCase()));
+  const filtered=[...searched].sort((a,b)=>{
+    if(sort==="name-az") return `${a.first_name} ${a.last_name}`.localeCompare(`${b.first_name} ${b.last_name}`);
+    if(sort==="name-za") return `${b.first_name} ${b.last_name}`.localeCompare(`${a.first_name} ${a.last_name}`);
+    if(sort==="score-hi") return (b.latestScore||0)-(a.latestScore||0);
+    if(sort==="score-lo") return (a.latestScore||999)-(b.latestScore||999);
+    if(sort==="recent") return new Date(b.lastDate||0)-new Date(a.lastDate||0);
+    return 0;
+  });
   const withS=athletes.filter(a=>a.latestScore!=null);
   const teamAvg=withS.length?Math.round(avg(withS.map(a=>a.latestScore))*100):0;
   const atRisk=athletes.filter(a=>a.latestScore&&a.latestScore<0.55).length;
   const overdue=athletes.filter(a=>a.lastSeen!=null&&a.lastSeen>7).length;
+  const selStyle={fontSize:12,padding:"7px 12px",border:`1px solid ${C.border}`,borderRadius:C.radiusSm,fontFamily:"inherit",background:C.surface,color:C.ink,cursor:"pointer",outline:"none"};
   return(
     <div>
       <div style={{marginBottom:26}}>
@@ -678,8 +734,22 @@ function AthleteList({onSelect,athletes:propAthletes,loading}){
           </div>
         ))}
       </div>
-      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes…"
-        style={{width:"100%",padding:"11px 16px",border:`1px solid ${C.border}`,borderRadius:C.radiusSm,fontSize:14,fontFamily:"inherit",background:C.surface,outline:"none",color:C.ink,marginBottom:14,boxSizing:"border-box"}}/>
+      <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center",flexWrap:"wrap"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search athletes…"
+          style={{flex:1,minWidth:180,padding:"11px 16px",border:`1px solid ${C.border}`,borderRadius:C.radiusSm,fontSize:14,fontFamily:"inherit",background:C.surface,outline:"none",color:C.ink,boxSizing:"border-box"}}/>
+        <select value={sort} onChange={e=>setSort(e.target.value)} style={selStyle}>
+          <option value="name-az">Name A-Z</option>
+          <option value="name-za">Name Z-A</option>
+          <option value="score-hi">Score High-Low</option>
+          <option value="score-lo">Score Low-High</option>
+          <option value="recent">Most Recent</option>
+        </select>
+        <select value={teamFilter} onChange={e=>setTeamFilter(e.target.value)} style={selStyle}>
+          <option value="all">All Teams</option>
+          {teamNames.map(t=><option key={t} value={t}>{t}</option>)}
+          <option value="none">No Team</option>
+        </select>
+      </div>
       <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:C.radius,overflow:"hidden"}}>
         {filtered.length===0&&<div style={{padding:32,textAlign:"center",color:C.muted,fontSize:13}}>No athletes found.</div>}
         {filtered.map((a,i)=>{
@@ -698,7 +768,10 @@ function AthleteList({onSelect,athletes:propAthletes,loading}){
               </div>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:14,fontWeight:700,color:C.ink}}>{a.first_name} {a.last_name}</div>
-                <div style={{fontSize:12,color:C.muted}}>{a.assessmentCount} assessments</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <span style={{fontSize:12,color:C.muted}}>{a.assessmentCount} assessments</span>
+                  {a.teamName&&<span style={{fontSize:9,background:C.limeXl,color:"#365314",borderRadius:4,padding:"1px 6px",fontWeight:700}}>{a.teamName}</span>}
+                </div>
               </div>
               <span style={{background:st.bg,color:st.color,borderRadius:999,padding:"3px 10px",fontSize:11,fontWeight:700,whiteSpace:"nowrap"}}>{st.label}</span>
               <div style={{display:"flex",alignItems:"center",gap:8,minWidth:80}}>
@@ -1270,36 +1343,19 @@ function LibraryView() {
   const [bodyFilter, setBodyFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState(null);
-  const bodies = ["all","core","hips","shoulders","lower_back","knees","ankles"];
+  const {movements,loading}=useMovements();
 
-  // Full movement list with real video URLs from DB
-  const FULL_MOVEMENTS = [
-    {name:"Tall Plank",body:["core","shoulders"],equipment:"none",super:["stability"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Plank.mp4",desc:"Full body isometric hold — shoulders stacked over wrists, body straight."},
-    {name:"Cat-Cow",body:["lower_back","core"],equipment:"none",super:["mobility","ROM"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Cat-Cow.mp4",desc:"Spinal flexion/extension flow for lower back mobility."},
-    {name:"Hip Flexor Stretch",body:["hips","lower_back"],equipment:"none",super:["flexibility","ROM"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Half_Kneeling_Hip_Flexor_Stretch.mp4",desc:"Half-kneeling lunge stretch targeting hip flexors and iliopsoas."},
-    {name:"Squat",body:["hips","knees","ankles"],equipment:"none",super:["functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Squat.mp4",desc:"Fundamental lower body strength pattern. Feet shoulder-width, chest tall."},
-    {name:"Push-Up",body:["chest","shoulders","core"],equipment:"none",super:["functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Push-Up.mp4",desc:"Upper body pressing pattern. Full lockout at top, chest near floor."},
-    {name:"Bodyweight Hip Hinge",body:["hips","lower_back"],equipment:"none",super:["mobility","ROM"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/sign/movement-demos/hiphinge.mp4?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV82NmJkOTZmMy05MTQ3LTQyNDMtODg5YS1iOTk2NTY4YzU4YWEiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJtb3ZlbWVudC1kZW1vcy9oaXBoaW5nZS5tcDQiLCJpYXQiOjE3NjIzOTExMjEsImV4cCI6MTc5MzkyNzEyMX0.knjp-DMZyM7lSFJyrRP95FBV4G2l5jqmkckEa9W6w7o",desc:"Hip hinge pattern — soft knee, hinge at hips, neutral spine."},
-    {name:"Bridge w/ Squeeze",body:["hips","glutes"],equipment:"none",super:["functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Bridge-w-Squeeze.mp4",desc:"Supine glute activation. Drive through heels, squeeze at top."},
-    {name:"Split Squat",body:["hips","knees"],equipment:"none",super:["stability","functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Split%20Squat.mp4",desc:"Single-leg strength pattern. Front shin vertical, back knee near floor."},
-    {name:"Calf Raises",body:["ankles"],equipment:"none",super:["functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Calf%20Raises.mp4",desc:"Ankle plantarflexion strength. Full range, pause at top."},
-    {name:"Bodyweight Clamshell",body:["hips"],equipment:"none",super:["functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Clamshell.mp4",desc:"Hip external rotation targeting glute medius. Control the return."},
-    {name:"1-Leg RDL",body:["hips","lower_back","knees"],equipment:"none",super:["stability","functional_strength"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/1-Leg%20RDL.mp4",desc:"Single-leg hip hinge. Balance + posterior chain activation."},
-    {name:"Chest Opener",body:["shoulders","chest"],equipment:"none",super:["flexibility","ROM"],video_url:"https://atvnjpwmydhqbxjgczti.supabase.co/storage/v1/object/public/movement-demos/Standing%20Chest%20Opener.mp4",desc:"Shoulder retraction and chest stretch. Arms behind back."},
-    {name:"Side Plank",body:["core"],equipment:"none",super:["stability"],video_url:null,desc:"Lateral core isometric hold. Hips up, body straight."},
-    {name:"Dead Bug",body:["core"],equipment:"none",super:["stability"],video_url:null,desc:"Supine core stability. Opposite arm/leg extend while lower back stays flat."},
-    {name:"Bird Dog",body:["core","lower_back"],equipment:"none",super:["stability"],video_url:null,desc:"Quadruped balance drill. Extend opposite arm/leg, keep hips square."},
-    {name:"Nordic Curl",body:["knees","hips"],equipment:"none",super:["functional_strength"],video_url:null,desc:"Eccentric hamstring strength. Highest ACL prehab value."},
-    {name:"Inchworm",body:["lower_back","hips"],equipment:"none",super:["mobility"],video_url:null,desc:"Dynamic forward fold to plank. Full body mobility + activation."},
-    {name:"Glute Bridge",body:["hips","glutes"],equipment:"none",super:["functional_strength"],video_url:null,desc:"Double-leg hip extension. Drive heels, neutral spine at top."},
-    {name:"Arm Circles",body:["shoulders"],equipment:"none",super:["mobility","ROM"],video_url:null,desc:"Dynamic shoulder warm-up. Small to large circles, both directions."},
-    {name:"Band Pull-Apart",body:["shoulders"],equipment:"band",super:["functional_strength"],video_url:null,desc:"Scapular retraction + shoulder health. Thumbs up, elbows soft."},
-  ];
+  const allMovements=movements||[];
+  const bodySet=new Set();
+  allMovements.forEach(m=>m.body.forEach(b=>bodySet.add(b)));
+  const bodies=["all",...[...bodySet].sort()];
 
-  const filtered = FULL_MOVEMENTS.filter(m =>
+  const filtered = allMovements.filter(m =>
     (bodyFilter === "all" || m.body.includes(bodyFilter)) &&
     m.name.toLowerCase().includes(search.toLowerCase())
   );
+
+  if(loading) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:200,color:C.muted,fontSize:14}}>Loading movements...</div>;
 
   return (
     <div>
@@ -1308,17 +1364,17 @@ function LibraryView() {
           style={{ padding: "9px 14px", border: `1px solid ${C.border}`, borderRadius: C.radiusSm, fontSize: 13, fontFamily: "inherit", background: C.surface, outline: "none", color: C.ink, width: 220 }} />
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
           {bodies.map(b => (
-            <button key={b} onClick={() => setBodyFilter(b)} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 6, border: `1px solid ${bodyFilter === b ? C.limeDim : C.border}`, background: bodyFilter === b ? C.limeXl : C.surface, color: bodyFilter === b ? C.ink : C.sub, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
-              {b === "all" ? "All Areas" : b.replace("_", " ").replace(/\b\w/g, l => l.toUpperCase())}
+            <button key={b} onClick={() => setBodyFilter(b)} style={{ fontSize: 11, padding: "5px 11px", borderRadius: 6, border: `1px solid ${bodyFilter === b ? C.lime : C.border}`, background: bodyFilter === b ? C.limeXl : C.surface, color: bodyFilter === b ? C.ink : C.sub, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+              {b === "all" ? "All Areas" : b.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase())}
             </button>
           ))}
         </div>
-        <span style={{ fontSize: 12, color: C.muted, marginLeft: "auto" }}>{filtered.length} movements · {FULL_MOVEMENTS.filter(m => m.video_url).length} with video</span>
+        <span style={{ fontSize: 12, color: C.muted, marginLeft: "auto" }}>{filtered.length} movements · {allMovements.filter(m => m.video_url).length} with video</span>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(200px,1fr))", gap: 12 }}>
         {filtered.map((m, i) => (
-          <div key={i} style={{ background: C.surface, borderRadius: C.radiusSm, border: `1px solid ${C.border}`, overflow: "hidden", cursor: "pointer", transition: "box-shadow .15s, transform .1s" }}
+          <div key={m.id||i} style={{ background: C.surface, borderRadius: C.radiusSm, border: `1px solid ${C.border}`, overflow: "hidden", cursor: "pointer", transition: "box-shadow .15s, transform .1s" }}
             onClick={() => setSelected(selected?.name === m.name ? null : m)}
             onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,.1)"; e.currentTarget.style.transform = "translateY(-1px)"; }}
             onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; e.currentTarget.style.transform = "none"; }}>
@@ -1326,12 +1382,10 @@ function LibraryView() {
             <div style={{ padding: "12px 14px" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: C.ink, marginBottom: 6 }}>{m.name}</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 3, marginBottom: 5 }}>
-                {m.body.map(b => <span key={b} style={{ fontSize: 9, background: C.limeXl, color: "#365314", borderRadius: 4, padding: "1px 5px", fontWeight: 700 }}>{b.replace("_", " ")}</span>)}
+                {m.body.map(b => <span key={b} style={{ fontSize: 9, background: C.limeXl, color: "#365314", borderRadius: 4, padding: "1px 5px", fontWeight: 700 }}>{b.replace(/_/g, " ")}</span>)}
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                {m.super.map(s => <span key={s} style={{ fontSize: 9, background: "#eff6ff", color: "#1d4ed8", borderRadius: 4, padding: "1px 5px" }}>{s.replace("_", " ")}</span>)}
-              </div>
-              {selected?.name === m.name && (
+              {m.equipment!=="none"&&<span style={{fontSize:9,background:"#eff6ff",color:"#1d4ed8",borderRadius:4,padding:"1px 5px"}}>equipment</span>}
+              {selected?.name === m.name && m.desc && (
                 <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.sub, lineHeight: 1.5 }}>{m.desc}</div>
               )}
             </div>
@@ -2374,6 +2428,104 @@ function TVDisplay({ session, onClose }) {
   );
 }
 
+// ─── TEAMS PAGE ──────────────────────────────────────────────────────────────
+function TeamsPage({athletes}){
+  const[expanded,setExpanded]=useState(null);
+  const allAthletes=athletes||FALLBACK_DB.athletes;
+  const teamMap={};
+  allAthletes.forEach(a=>{
+    const key=a.teamId||"__none";
+    if(!teamMap[key]) teamMap[key]={id:a.teamId,name:a.teamName||"Unassigned",members:[]};
+    teamMap[key].members.push(a);
+  });
+  const teams=Object.values(teamMap).sort((a,b)=>a.name==="Unassigned"?1:b.name==="Unassigned"?-1:a.name.localeCompare(b.name));
+  const TEAM_COLORS={"Performance Group":"#c8e64e","Rehab Track":"#fb923c","Foundations":"#818cf8","Unassigned":"#a1a1aa"};
+
+  return(
+    <div>
+      <div style={{marginBottom:26}}>
+        <h1 style={{fontSize:28,fontWeight:800,color:C.ink,margin:"0 0 4px"}}>Teams</h1>
+        <p style={{margin:0,fontSize:14,color:C.sub}}>Overview of team composition, scores, and injury status</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:14,marginBottom:24}}>
+        {teams.map(team=>{
+          const col=TEAM_COLORS[team.name]||"#a1a1aa";
+          const scored=team.members.filter(m=>m.latestScore!=null);
+          const avgScore=scored.length?Math.round(avg(scored.map(m=>m.latestScore))*100):null;
+          const atRisk=team.members.filter(m=>m.latestScore&&m.latestScore<0.55).length;
+          const injured=team.members.filter(m=>m.injuries?.length>0).length;
+          return(
+            <div key={team.id||"none"} onClick={()=>setExpanded(expanded===team.id?null:team.id)} style={{background:C.surface,borderRadius:C.radius,border:`1px solid ${expanded===team.id?col:C.border}`,overflow:"hidden",cursor:"pointer",transition:"border-color .15s"}}
+              onMouseEnter={e=>{if(expanded!==team.id)e.currentTarget.style.borderColor=col+"80";}}
+              onMouseLeave={e=>{if(expanded!==team.id)e.currentTarget.style.borderColor=C.border;}}>
+              <div style={{padding:"20px 22px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+                  <div style={{width:12,height:12,borderRadius:"50%",background:col,flexShrink:0,boxShadow:`0 0 0 3px ${col}40`}}/>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:16,fontWeight:800,color:C.ink}}>{team.name}</div>
+                    <div style={{fontSize:12,color:C.muted}}>{team.members.length} athlete{team.members.length!==1?"s":""}</div>
+                  </div>
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth={2.5} style={{transform:expanded===team.id?"rotate(180deg)":"none",transition:"transform .2s"}}><polyline points="6 9 12 15 18 9"/></svg>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
+                  <div style={{background:C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:22,fontWeight:800,color:avgScore?sc(avgScore):C.muted,lineHeight:1}}>{avgScore??"-"}</div>
+                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>Avg Score</div>
+                  </div>
+                  <div style={{background:atRisk>0?"#fff7ed":C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:22,fontWeight:800,color:atRisk>0?"#ea580c":C.muted,lineHeight:1}}>{atRisk}</div>
+                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>At Risk</div>
+                  </div>
+                  <div style={{background:injured>0?"#fef2f2":C.bg,borderRadius:C.radiusSm,padding:"10px 12px",textAlign:"center"}}>
+                    <div style={{fontSize:22,fontWeight:800,color:injured>0?"#dc2626":C.muted,lineHeight:1}}>{injured}</div>
+                    <div style={{fontSize:10,color:C.muted,marginTop:3}}>Injured</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:-4,marginTop:12}}>
+                  {team.members.slice(0,6).map((m,i)=>(
+                    <div key={m.id} style={{width:30,height:30,borderRadius:"50%",background:C.limeXl,border:`2px solid ${C.surface}`,display:"grid",placeItems:"center",fontWeight:800,fontSize:9,color:C.ink,marginLeft:i>0?-6:0,zIndex:6-i}}>
+                      {(m.first_name?.[0]||"")+(m.last_name?.[0]||"")}
+                    </div>
+                  ))}
+                  {team.members.length>6&&<div style={{width:30,height:30,borderRadius:"50%",background:C.bg,border:`2px solid ${C.surface}`,display:"grid",placeItems:"center",fontSize:9,fontWeight:700,color:C.muted,marginLeft:-6}}>+{team.members.length-6}</div>}
+                </div>
+              </div>
+              {expanded===team.id&&(
+                <div style={{borderTop:`1px solid ${C.border}`}}>
+                  {team.members.map((m,i)=>{
+                    const s=m.latestScore?Math.round(m.latestScore*100):null;
+                    const mCol=s?sc(s):C.muted;
+                    const st=ST[status(m.latestScore,m.firstScore)]||ST.stable;
+                    return(
+                      <div key={m.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 22px",borderBottom:i<team.members.length-1?`1px solid ${C.border}`:"none"}}>
+                        <div style={{width:34,height:34,borderRadius:"50%",background:C.limeXl,display:"grid",placeItems:"center",fontWeight:800,fontSize:11,color:C.ink,flexShrink:0}}>
+                          {(m.first_name?.[0]||"")+(m.last_name?.[0]||"")}
+                        </div>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:700,color:C.ink}}>{m.first_name} {m.last_name}</div>
+                          <div style={{fontSize:11,color:C.muted}}>{m.assessmentCount} assessments</div>
+                        </div>
+                        <span style={{background:st.bg,color:st.color,borderRadius:999,padding:"2px 8px",fontSize:10,fontWeight:700}}>{st.label}</span>
+                        <span style={{fontSize:20,fontWeight:800,color:mCol,minWidth:36,textAlign:"right"}}>{s??"--"}</span>
+                        {m.injuries?.length>0&&(
+                          <div style={{display:"flex",gap:3,flexWrap:"wrap",maxWidth:140}}>
+                            {m.injuries.slice(0,2).map((inj,j)=><span key={j} style={{fontSize:9,background:"#fef2f2",color:"#dc2626",borderRadius:4,padding:"1px 5px",fontWeight:600}}>{inj.length>16?inj.slice(0,16)+"...":inj}</span>)}
+                            {m.injuries.length>2&&<span style={{fontSize:9,color:C.muted}}>+{m.injuries.length-2}</span>}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ─── APP SHELL ────────────────────────────────────────────────────────────────
 export default function App() {
   const [view, setView] = useState("list");
@@ -2391,6 +2543,7 @@ export default function App() {
 
   const navItems = [
     {id:"athletes",label:"Athletes",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>},
+    {id:"teams",label:"Teams",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><circle cx="12" cy="5" r="3"/><path d="M12 8v4"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="M12 12l-7 4"/><path d="M12 12l7 4"/></svg>},
     {id:"programs",label:"Programs",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>},
     {id:"analytics",label:"Analytics",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>},
     {id:"sessions",label:"Sessions",icon:<svg width={17} height={17} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>},
@@ -2430,6 +2583,7 @@ export default function App() {
         </div>
       </aside>
       <main ref={contentRef} style={{ flex: 1, overflow: "auto", padding: 30 }}>
+        {nav === "teams"     && <TeamsPage athletes={athletes} />}
         {nav === "programs"  && <ProgramsTab savedWorkouts={savedWorkouts} setSavedWorkouts={setSavedWorkouts} />}
         {nav === "analytics" && <AnalyticsTab />}
         {nav === "sessions"  && <SessionsTab />}
