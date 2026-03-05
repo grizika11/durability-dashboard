@@ -21,17 +21,18 @@ src/
 ├── components/Layout.jsx     ← Legacy, not used
 ├── pages/                    ← Legacy pages, not used
 ├── data/mockData.js          ← Legacy mock data, not used
-└── lib/supabase.js           ← Supabase client stub
+└── lib/supabase.js           ← Supabase client (hardcoded URL + anon key)
 ```
 
 ## Architecture: DurabilityDashboard.jsx
 Single-file component. Structure from top to bottom:
 
-1. **Imports** — React hooks + recharts
-2. **Real athlete data** — hardcoded from Supabase query results (lines ~4–90)
+1. **Imports** — React hooks + recharts + supabase client
+2. **Fallback athlete data** (`FALLBACK_DB`) — used when Supabase queries fail (lines ~4–90)
 3. **Color constants** (`C` object) — single source of truth for all colors
 4. **Helper functions** — `sc()` score color, `fmt()` date formatter
-5. **Data constants** — `TEAMS_DATA`, `BLOCK_LIBRARY`, `TEAM_INSIGHTS`, `MOVEMENT_LIBRARY`, `SESSIONS_DATA`, `ANALYTICS_DATA`, `BLOCK_MOVEMENTS_DETAIL`
+5. **Supabase data hooks** — `useAthletes()`, `useAthleteAssessments(athleteId)`
+6. **Data constants** — `TEAMS_DATA`, `BLOCK_LIBRARY`, `TEAM_INSIGHTS`, `MOVEMENT_LIBRARY`, `SESSIONS_DATA`, `ANALYTICS_DATA`, `BLOCK_MOVEMENTS_DETAIL`
 6. **Components** (in render order):
    - `VideoCard` — autoplay movement video with gradient fallback
    - `AngleRow`, `MovementCard`, `AssessmentDetail` — assessment breakdown
@@ -91,11 +92,15 @@ const C = {
 - `assessment_exercise_reps` uses `overall_score` (not `score`)
 - Injuries are in a junction table (`profile_injuries`), not a column on `profiles`
 
-## Live Supabase Data
-Athletes and assessment data are fetched live from Supabase on load. `App` fetches `profiles` + `profile_injuries` + assessment counts/scores, passes `athletes` as a prop to `AthleteList`. `AthleteDetail` lazy-loads `assessment_results`, `assessment_exercise_reps`, and `assessment_exercise_data` when selected. `FALLBACK_DB` at the top of the file is used as fallback when Supabase is unavailable.
+## Supabase Client (`src/lib/supabase.js`)
+The Supabase URL and anon key are **hardcoded** directly in `src/lib/supabase.js`. No `.env` file or environment variables are needed for the dashboard to function. The anon key is a public key (visible in every browser request) — not a secret.
 
-### .env requirement
-A `.env` file with `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` is required. See `.env.example`.
+## Live Supabase Data
+Athletes and assessment data are fetched live via two hooks in `DurabilityDashboard.jsx`:
+- **`useAthletes()`** — fetches `profiles`, `profile_injuries`, `assessments`, and `assessment_results` on mount. Returns `{athletes, loading, reload}`. Auto-refreshes every 60s.
+- **`useAthleteAssessments(athleteId)`** — lazy-loads `assessment_results`, `assessment_exercise_reps`, and `assessment_exercise_data` when an athlete is selected. Returns `{assessments, exercises, loading, reload}`.
+
+`App` uses `useAthletes()` and passes `athletes` to `AthleteList`. `AthleteDetail` uses `useAthleteAssessments()` and has a Refresh button. `FALLBACK_DB` at the top of the file is used as fallback when Supabase queries fail.
 
 ## Injuries (important for program logic)
 - 6/10 athletes have lower body injuries
@@ -105,7 +110,7 @@ A `.env` file with `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` is required.
 
 ## State Architecture
 Key state in `App` (root):
-- `athletes` / `athletesLoading` — fetched from Supabase `user_profiles` on mount, passed to `AthleteList`
+- `athletes` / `loading` / `reload` — from `useAthletes()` hook, passed to `AthleteList`; auto-refreshes every 60s
 - `savedWorkouts` / `setSavedWorkouts` — passed down to ProgramsTab → TeamsView + BuilderView + WorkoutLibraryView
 
 Key state in `TeamsView`:
