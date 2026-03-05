@@ -1,8 +1,12 @@
 import { createClient } from '@supabase/supabase-js'
 
-const url = import.meta.env.VITE_SUPABASE_URL
-const key = import.meta.env.VITE_SUPABASE_ANON_KEY
+const SUPABASE_URL = 'https://atvnjpwmydhqbxjgczti.supabase.co'
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-export const supabase = (url && url.length > 0 && key && key.length > 0)
-  ? createClient(url, key)
+if (!SUPABASE_ANON_KEY) {
+  console.error('VITE_SUPABASE_ANON_KEY is not set — dashboard will use fallback data')
+}
+
+export const supabase = (SUPABASE_ANON_KEY && SUPABASE_ANON_KEY.length > 0)
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null

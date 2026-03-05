@@ -132,6 +132,184 @@ const ST={
   pending:{color:"#a1a1aa",bg:"#fafafa",label:"No Data"},
 };
 
+// ─── SUPABASE DATA HOOKS ─────────────────────────────────────────────────────
+function useAthletes(){
+  const[athletes,setAthletes]=useState(null);
+  const[loading,setLoading]=useState(true);
+
+  async function load(){
+    if(!supabase){
+      console.warn("No Supabase client — using fallback data");
+      setLoading(false);
+      return;
+    }
+    try {
+      setLoading(true);
+      const {data:profiles,error}=await supabase
+        .from("profiles")
+        .select("id,first_name,last_name")
+        .order("first_name");
+      if(error) throw error;
+      if(!profiles){setLoading(false);return;}
+
+      const {data:injRows}=await supabase
+        .from("profile_injuries")
+        .select("profile_id,injuries(name)")
+        .in("profile_id",profiles.map(p=>p.id));
+      const injuriesByProfile={};
+      (injRows||[]).forEach(r=>{
+        if(!injuriesByProfile[r.profile_id]) injuriesByProfile[r.profile_id]=[];
+        if(r.injuries?.name) injuriesByProfile[r.profile_id].push(r.injuries.name);
+      });
+
+      const {data:assessments,error:aErr}=await supabase
+        .from("assessments")
+        .select("id,profile_id,created_at")
+        .in("profile_id",profiles.map(p=>p.id))
+        .order("created_at",{ascending:false});
+      if(aErr) throw aErr;
+
+      const countMap={},lastDateMap={},latestPerUser={};
+      (assessments||[]).forEach(a=>{
+        countMap[a.profile_id]=(countMap[a.profile_id]||0)+1;
+        if(!lastDateMap[a.profile_id]) lastDateMap[a.profile_id]=a.created_at;
+        if(!latestPerUser[a.profile_id]) latestPerUser[a.profile_id]=[];
+        if(latestPerUser[a.profile_id].length<10) latestPerUser[a.profile_id].push(a.id);
+      });
+
+      const allLatestIds=Object.values(latestPerUser).flat();
+      const durByAssessment={};
+      if(allLatestIds.length){
+        const {data:results,error:rErr}=await supabase
+          .from("assessment_results")
+          .select("assessment_id,durability_score")
+          .in("assessment_id",allLatestIds);
+        if(rErr) throw rErr;
+        (results||[]).forEach(r=>{
+          if(r.durability_score!=null) durByAssessment[r.assessment_id]=parseFloat(r.durability_score);
+        });
+      }
+
+      const transformed=profiles.map(p=>{
+        const aIds=latestPerUser[p.id]||[];
+        const history=aIds.map(aId=>durByAssessment[aId]??null).filter(v=>v!=null);
+        const latestScore=history.length?history[0]:null;
+        const firstScore=history.length?history[history.length-1]:null;
+        return {
+          id:p.id,first_name:p.first_name,last_name:p.last_name,
+          injuries:injuriesByProfile[p.id]||[],
+          assessmentCount:countMap[p.id]||0,
+          latestScore,firstScore,
+          lastDate:lastDateMap[p.id]||null,
+          history:history.slice().reverse(),
+        };
+      });
+      setAthletes(transformed);
+    } catch(e){
+      console.error("Failed to load athletes:",e.message||e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(()=>{load();},[]);
+
+  return {athletes,loading,reload:load};
+}
+
+function useAthleteAssessments(athleteId){
+  const[assessments,setAssessments]=useState(null);
+  const[exercises,setExercises]=useState(null);
+  const[loading,setLoading]=useState(false);
+
+  async function load(){
+    if(!supabase||!athleteId){return;}
+    setLoading(true);
+    try {
+      const {data:aRows,error}=await supabase
+        .from("assessments")
+        .select("id,created_at")
+        .eq("profile_id",athleteId)
+        .order("created_at",{ascending:false})
+        .limit(10);
+      if(error) throw error;
+      if(!aRows?.length){setAssessments([]);setExercises({});setLoading(false);return;}
+
+      const aIds=aRows.map(a=>a.id);
+
+      const {data:results,error:rErr}=await supabase
+        .from("assessment_results")
+        .select("assessment_id,durability_score,shoulder_score,hips_score,knee_score,ankle_score,core_score,lower_back_score,chest_score,arms_score,range_of_motion_score,flexibility_score,mobility_score,functional_strength_score")
+        .in("assessment_id",aIds);
+      if(rErr) throw rErr;
+
+      const resultsByAId={};
+      (results||[]).forEach(r=>{resultsByAId[r.assessment_id]=r;});
+
+      const grouped=aRows.map(a=>{
+        const r=resultsByAId[a.id]||{};
+        const pf=v=>v!=null?parseFloat(v):null;
+        return {
+          id:a.id,created_at:a.created_at,
+          durability_score:pf(r.durability_score),shoulder_score:pf(r.shoulder_score),
+          hips_score:pf(r.hips_score),knee_score:pf(r.knee_score),
+          ankle_score:pf(r.ankle_score),core_score:pf(r.core_score),
+          lower_back_score:pf(r.lower_back_score),chest_score:pf(r.chest_score),
+          arms_score:pf(r.arms_score),range_of_motion_score:pf(r.range_of_motion_score),
+          flexibility_score:pf(r.flexibility_score),mobility_score:pf(r.mobility_score),
+          functional_strength_score:pf(r.functional_strength_score),
+        };
+      });
+
+      const {data:reps}=await supabase
+        .from("assessment_exercise_reps")
+        .select("assessment_id,exercise_name,rep_number,overall_score")
+        .in("assessment_id",aIds)
+        .order("exercise_name").order("rep_number");
+
+      const {data:exData}=await supabase
+        .from("assessment_exercise_data")
+        .select("assessment_id,exercise_name,angles,nuances")
+        .in("assessment_id",aIds);
+
+      const exDataMap={};
+      (exData||[]).forEach(r=>{
+        exDataMap[`${r.assessment_id}|${r.exercise_name}`]={
+          angles:(r.angles||[]).map(a=>({id:a.angleId,mean:a.mean,max:a.max,min:a.min})),
+          nuances:r.nuances||[],
+        };
+      });
+
+      const exByAssessment={};
+      (reps||[]).forEach(r=>{
+        if(!exByAssessment[r.assessment_id]) exByAssessment[r.assessment_id]={};
+        if(!exByAssessment[r.assessment_id][r.exercise_name]) exByAssessment[r.assessment_id][r.exercise_name]=[];
+        exByAssessment[r.assessment_id][r.exercise_name].push(r.overall_score);
+      });
+      const exerciseMap={};
+      Object.entries(exByAssessment).forEach(([aId,exObj])=>{
+        exerciseMap[aId]=Object.entries(exObj).map(([name,repScores])=>{
+          const extra=exDataMap[`${aId}|${name}`]||{};
+          return {name,reps:repScores,nuances:extra.nuances||[],angles:extra.angles||[]};
+        });
+      });
+
+      setAssessments(grouped);
+      setExercises(exerciseMap);
+    } catch(e){
+      console.error("Failed to load assessments for",athleteId,":",e.message||e);
+      setAssessments(null);
+      setExercises(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(()=>{load();},[athleteId]);
+
+  return {assessments,exercises,loading,reload:load};
+}
+
 // ─── PRIMITIVES ───────────────────────────────────────────────────────────────
 function Spark({data,color,w=56,h=20}){
   if(!data||data.length<2) return null;
@@ -427,118 +605,11 @@ function OverviewTab({athlete,assessments:propAssessments}){
 // ─── ATHLETE DETAIL ───────────────────────────────────────────────────────────
 function AthleteDetail({athlete,onBack}){
   const[tab,setTab]=useState("overview");
-  const[liveAssessments,setLiveAssessments]=useState(null);
-  const[liveExercises,setLiveExercises]=useState(null);
-  const[loadingAssessments,setLoadingAssessments]=useState(true);
+  const{assessments:liveAssessments,exercises:liveExercises,loading:loadingAssessments,reload}=useAthleteAssessments(athlete?.id);
   const st=ST[status(athlete.latestScore,athlete.firstScore)]||ST.stable;
-
-  useEffect(()=>{
-    if(!athlete?.id||!supabase){setLoadingAssessments(false);return;}
-    let cancelled=false;
-    (async()=>{
-      setLoadingAssessments(true);
-      try {
-        // assessments table uses profile_id
-        const {data:assessments}=await supabase
-          .from("assessments")
-          .select("id,created_at")
-          .eq("profile_id",athlete.id)
-          .order("created_at",{ascending:false})
-          .limit(10);
-        if(cancelled||!assessments?.length){setLoadingAssessments(false);return;}
-
-        const aIds=assessments.map(a=>a.id);
-
-        // assessment_results: one row per assessment with direct score columns
-        const {data:results}=await supabase
-          .from("assessment_results")
-          .select("assessment_id,durability_score,shoulder_score,hips_score,knee_score,ankle_score,core_score,lower_back_score,chest_score,arms_score,range_of_motion_score,flexibility_score,mobility_score,functional_strength_score")
-          .in("assessment_id",aIds);
-
-        if(cancelled) return;
-
-        // Map results by assessment_id (one row each)
-        const resultsByAId={};
-        (results||[]).forEach(r=>{resultsByAId[r.assessment_id]=r;});
-
-        const grouped=assessments.map(a=>{
-          const r=resultsByAId[a.id]||{};
-          return {
-            id:a.id,
-            created_at:a.created_at,
-            durability_score:r.durability_score!=null?parseFloat(r.durability_score):null,
-            shoulder_score:r.shoulder_score!=null?parseFloat(r.shoulder_score):null,
-            hips_score:r.hips_score!=null?parseFloat(r.hips_score):null,
-            knee_score:r.knee_score!=null?parseFloat(r.knee_score):null,
-            ankle_score:r.ankle_score!=null?parseFloat(r.ankle_score):null,
-            core_score:r.core_score!=null?parseFloat(r.core_score):null,
-            lower_back_score:r.lower_back_score!=null?parseFloat(r.lower_back_score):null,
-            chest_score:r.chest_score!=null?parseFloat(r.chest_score):null,
-            arms_score:r.arms_score!=null?parseFloat(r.arms_score):null,
-            range_of_motion_score:r.range_of_motion_score!=null?parseFloat(r.range_of_motion_score):null,
-            flexibility_score:r.flexibility_score!=null?parseFloat(r.flexibility_score):null,
-            mobility_score:r.mobility_score!=null?parseFloat(r.mobility_score):null,
-            functional_strength_score:r.functional_strength_score!=null?parseFloat(r.functional_strength_score):null,
-          };
-        });
-
-        // Fetch exercise reps (overall_score, not score)
-        const {data:reps}=await supabase
-          .from("assessment_exercise_reps")
-          .select("assessment_id,exercise_name,rep_number,overall_score")
-          .in("assessment_id",aIds)
-          .order("exercise_name").order("rep_number");
-
-        // Fetch exercise data (angles + nuances)
-        const {data:exData}=await supabase
-          .from("assessment_exercise_data")
-          .select("assessment_id,exercise_name,angles,nuances")
-          .in("assessment_id",aIds);
-
-        if(cancelled) return;
-
-        // Build nuances/angles lookup: assessmentId → exerciseName → {angles,nuances}
-        const exDataMap={};
-        (exData||[]).forEach(r=>{
-          const key=`${r.assessment_id}|${r.exercise_name}`;
-          exDataMap[key]={
-            angles:(r.angles||[]).map(a=>({id:a.angleId,mean:a.mean,max:a.max,min:a.min})),
-            nuances:r.nuances||[],
-          };
-        });
-
-        // Group exercises by assessment_id
-        const exByAssessment={};
-        (reps||[]).forEach(r=>{
-          if(!exByAssessment[r.assessment_id]) exByAssessment[r.assessment_id]={};
-          if(!exByAssessment[r.assessment_id][r.exercise_name]) exByAssessment[r.assessment_id][r.exercise_name]=[];
-          exByAssessment[r.assessment_id][r.exercise_name].push(r.overall_score);
-        });
-        const exerciseMap={};
-        Object.entries(exByAssessment).forEach(([aId,exObj])=>{
-          exerciseMap[aId]=Object.entries(exObj).map(([name,repScores])=>{
-            const extra=exDataMap[`${aId}|${name}`]||{};
-            return {
-              name,
-              reps:repScores,
-              nuances:extra.nuances||[],
-              angles:extra.angles||[],
-            };
-          });
-        });
-
-        setLiveAssessments(grouped);
-        setLiveExercises(exerciseMap);
-      } catch(e){
-        console.error("fetchAssessments failed:",e);
-        // Fall back to hardcoded data
-      }
-      setLoadingAssessments(false);
-    })();
-    return ()=>{cancelled=true;};
-  },[athlete?.id]);
   return(
     <div>
+      <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
       <button onClick={onBack} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",fontFamily:"inherit",fontSize:13,color:C.sub,padding:"0 0 20px",fontWeight:500}}>
         <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><polyline points="15 18 9 12 15 6"/></svg>
         All Athletes
@@ -558,6 +629,10 @@ function AthleteDetail({athlete,onBack}){
               <span>·</span><span>{athlete.assessmentCount} total assessments</span>
             </div>
           </div>
+          <button onClick={reload} disabled={loadingAssessments} style={{fontSize:11,fontWeight:700,fontFamily:"inherit",background:C.limeXl,color:C.ink,border:`1px solid ${C.lime}`,borderRadius:7,padding:"6px 12px",cursor:loadingAssessments?"wait":"pointer",opacity:loadingAssessments?0.6:1,display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
+            <svg width={11} height={11} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} style={{animation:loadingAssessments?"spin 1s linear infinite":"none"}}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            {loadingAssessments?"Loading...":"Refresh"}
+          </button>
           {athlete.latestScore&&<Ring score={athlete.latestScore} size={84} stroke={7}/>}
         </div>
       </div>
@@ -2311,84 +2386,12 @@ export default function App() {
   const [nav, setNav] = useState("athletes");
   const [savedWorkouts, setSavedWorkouts] = useState([]);
   const contentRef = useRef(null);
-  const [athletes, setAthletes] = useState(null);
-  const [athletesLoading, setAthletesLoading] = useState(true);
+  const {athletes,loading:athletesLoading,reload:reloadAthletes}=useAthletes();
 
+  // Auto-refresh athlete list every 60 seconds
   useEffect(()=>{
-    (async()=>{
-      if(!supabase){setAthletesLoading(false);return;}
-      try {
-        // Fetch profiles
-        const {data:profiles,error}=await supabase
-          .from("profiles")
-          .select("id,first_name,last_name")
-          .order("first_name");
-        if(error||!profiles){setAthletesLoading(false);return;}
-
-        // Fetch injuries via junction table
-        const {data:injRows}=await supabase
-          .from("profile_injuries")
-          .select("profile_id,injuries(name)")
-          .in("profile_id",profiles.map(p=>p.id));
-        const injuriesByProfile={};
-        (injRows||[]).forEach(r=>{
-          if(!injuriesByProfile[r.profile_id]) injuriesByProfile[r.profile_id]=[];
-          if(r.injuries?.name) injuriesByProfile[r.profile_id].push(r.injuries.name);
-        });
-
-        // Fetch all assessments (profile_id, not user_id)
-        const {data:assessments}=await supabase
-          .from("assessments")
-          .select("id,profile_id,created_at")
-          .in("profile_id",profiles.map(p=>p.id))
-          .order("created_at",{ascending:false});
-
-        const countMap={};
-        const lastDateMap={};
-        const latestPerUser={};
-        (assessments||[]).forEach(a=>{
-          countMap[a.profile_id]=(countMap[a.profile_id]||0)+1;
-          if(!lastDateMap[a.profile_id]) lastDateMap[a.profile_id]=a.created_at;
-          if(!latestPerUser[a.profile_id]) latestPerUser[a.profile_id]=[];
-          if(latestPerUser[a.profile_id].length<10) latestPerUser[a.profile_id].push(a.id);
-        });
-
-        // Fetch durability_score from assessment_results (one row per assessment)
-        const allLatestIds=Object.values(latestPerUser).flat();
-        const durByAssessment={};
-        if(allLatestIds.length){
-          const {data:results}=await supabase
-            .from("assessment_results")
-            .select("assessment_id,durability_score")
-            .in("assessment_id",allLatestIds);
-          (results||[]).forEach(r=>{
-            if(r.durability_score!=null) durByAssessment[r.assessment_id]=parseFloat(r.durability_score);
-          });
-        }
-
-        const transformed=profiles.map(p=>{
-          const aIds=latestPerUser[p.id]||[];
-          const history=aIds.map(aId=>durByAssessment[aId]??null).filter(v=>v!=null);
-          const latestScore=history.length?history[0]:null;
-          const firstScore=history.length?history[history.length-1]:null;
-          return {
-            id:p.id,
-            first_name:p.first_name,
-            last_name:p.last_name,
-            injuries:injuriesByProfile[p.id]||[],
-            assessmentCount:countMap[p.id]||0,
-            latestScore,firstScore,
-            lastDate:lastDateMap[p.id]||null,
-            history:history.slice().reverse(),
-          };
-        });
-        setAthletes(transformed);
-      } catch(e){
-        console.error("fetchAthletes failed:",e);
-        // athletes stays null → fallback used in AthleteList
-      }
-      setAthletesLoading(false);
-    })();
+    const iv=setInterval(reloadAthletes,60000);
+    return ()=>clearInterval(iv);
   },[]);
 
   const navItems = [
