@@ -72,19 +72,27 @@ const C = {
 **Never use hardcoded hex colors in JSX. Always use `C.*`.**
 
 ## Supabase Schema (key tables)
-- `user_profiles` — 10 real athletes (id, first_name, last_name, injuries)
-- `assessment_results` — body region + super metric scores per assessment
-- `assessment_exercise_reps` — per-rep scores (0–1 scale)
-- `assessment_exercise_data` — JSONB angle arrays
+- `profiles` — 10 athletes (id, first_name, last_name, email, date_of_birth, etc.)
+- `profile_injuries` → `injuries` — junction table linking profiles to injury names
+- `assessments` — one row per assessment session (id, profile_id, created_at, assessment_mode, movements_tested)
+- `assessment_results` — one row per assessment with direct score columns: durability_score, shoulder_score, hips_score, knee_score, ankle_score, core_score, lower_back_score, chest_score, arms_score, elbows_score, wrists_score, range_of_motion_score, flexibility_score, mobility_score, functional_strength_score, aerobic_capacity_score
+- `assessment_exercise_reps` — per-rep data (assessment_id, profile_id, exercise_name, rep_number, overall_score, angles, nuances, body_part_scores, super_metric_scores, component_scores)
+- `assessment_exercise_data` — per-exercise summary (assessment_id, exercise_name, angles JSONB [{angleId, mean, max, min}], nuances text[], rep_count, exercise_duration_seconds)
 - `programs` → `program_weeks` → `program_workouts` → `program_workout_blocks`
 - `movement_blocks` → `movement_block_items` → `movements`
 - `coaches`, `teams`, `team_members` — coach/team structure
 - `user_programs` — assigned programs (assigned_by, team_id, source, coach_notes)
 - `uploaded_workouts` — coach-uploaded workout files
-- RLS policies applied — use service role for seeding, anon key for reads
+- RLS: anon read policies on profiles, assessments, assessment_results, assessment_exercise_reps, assessment_exercise_data, profile_injuries, injuries
+
+**Important column notes:**
+- Assessments link to profiles via `profile_id` (not `user_id`)
+- `assessment_results` stores scores as direct columns (not body_region/score rows)
+- `assessment_exercise_reps` uses `overall_score` (not `score`)
+- Injuries are in a junction table (`profile_injuries`), not a column on `profiles`
 
 ## Live Supabase Data
-Athletes and assessment data are now fetched live from Supabase on load. The `App` component fetches `user_profiles` and computes assessment counts/scores, then passes `athletes` as a prop to `AthleteList`. `AthleteDetail` lazy-loads assessment results and exercise reps when an athlete is selected. Hardcoded `FALLBACK_DB` at the top of the file is used as fallback when Supabase is unavailable.
+Athletes and assessment data are fetched live from Supabase on load. `App` fetches `profiles` + `profile_injuries` + assessment counts/scores, passes `athletes` as a prop to `AthleteList`. `AthleteDetail` lazy-loads `assessment_results`, `assessment_exercise_reps`, and `assessment_exercise_data` when selected. `FALLBACK_DB` at the top of the file is used as fallback when Supabase is unavailable.
 
 ### .env requirement
 A `.env` file with `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` is required. See `.env.example`.
