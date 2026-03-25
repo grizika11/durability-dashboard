@@ -2710,7 +2710,52 @@ function TeamsPage({teams,setTeams,athletes,reload}){
 }
 
 // ─── APP SHELL ────────────────────────────────────────────────────────────────
+// ─── Password Gate ───────────────────────────────────────────────────────────
+const DASHBOARD_PASSWORD = "durability2026";
+
+function LoginScreen({ onAuth }) {
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState(false);
+  const submit = (e) => {
+    e.preventDefault();
+    if (pw === DASHBOARD_PASSWORD) {
+      sessionStorage.setItem("dash_auth", "1");
+      onAuth();
+    } else {
+      setError(true);
+      setPw("");
+    }
+  };
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: C.bg, fontFamily: "'DM Sans',system-ui,sans-serif" }}>
+      <form onSubmit={submit} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: C.radius, padding: "40px 36px", width: 340, display: "flex", flexDirection: "column", gap: 18, alignItems: "center" }}>
+        <div style={{ width: 48, height: 48, background: C.lime, borderRadius: 13, display: "grid", placeItems: "center" }}>
+          <svg width={24} height={24} viewBox="0 0 24 24" fill="none" stroke={C.ink} strokeWidth={2.5} strokeLinecap="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+          </svg>
+        </div>
+        <div style={{ fontWeight: 800, fontSize: 18, color: C.ink }}>Durability Dashboard</div>
+        <div style={{ fontSize: 13, color: C.sub, textAlign: "center" }}>Enter the coach password to continue</div>
+        <input
+          type="password"
+          value={pw}
+          onChange={e => { setPw(e.target.value); setError(false); }}
+          placeholder="Password"
+          autoFocus
+          style={{ width: "100%", padding: "10px 14px", borderRadius: C.radiusSm, border: `1px solid ${error ? "#ef4444" : C.border}`, fontFamily: "inherit", fontSize: 14, outline: "none", boxSizing: "border-box" }}
+        />
+        {error && <div style={{ fontSize: 12, color: "#ef4444", marginTop: -10 }}>Incorrect password</div>}
+        <button type="submit" style={{ width: "100%", padding: "10px 0", background: C.lime, color: C.ink, border: "none", borderRadius: 9, fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+          Sign In
+        </button>
+      </form>
+    </div>
+  );
+}
+
 export default function App() {
+  const [authed, setAuthed] = useState(() => sessionStorage.getItem("dash_auth") === "1");
   const [view, setView] = useState("list");
   const [selected, setSelected] = useState(null);
   const [nav, setNav] = useState("athletes");
@@ -2718,6 +2763,8 @@ export default function App() {
   const contentRef = useRef(null);
   const {athletes,loading:athletesLoading,reload:reloadAthletes}=useAthletes();
   const {teams,setTeams}=useTeams();
+
+  if (!authed) return <LoginScreen onAuth={() => setAuthed(true)} />;
 
 
   const navItems = [
